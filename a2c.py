@@ -71,12 +71,12 @@ class A2C:
             latest = self.checkpoint_manager.latest_checkpoint
             if latest:
                 self.checkpoint.restore(latest).expect_partial()
-                print("Loaded model: {}".format(latest))
+                print("Loaded model: {}".format(latest), flush=True)
             else:
-                print("No saved model to load, starting a new model from scratch.")
+                print("No saved model to load, starting a new model from scratch.", flush=True)
         except Exception as e:
-            print(e)
-            print("No saved model to load, starting a new model from scratch.")
+            print(e, flush=True)
+            print("No saved model to load, starting a new model from scratch.", flush=True)
 
     def __call__(self, state):
         p = self.get_probs(state)

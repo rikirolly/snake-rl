@@ -25,14 +25,14 @@ class AgentProcess(Process):
             msg = self.conn.recv()
             if msg == "load":
                 self.agent.load_model()
-                print("Process "+str(self.id)+" loaded the master (0) model.")
+                print("Process "+str(self.id)+" loaded the master (0) model.", flush=True)
 
             if msg[0] == "train_with_batchs":
-                print("Master process is training ...")
+                print("Master process is training ...", flush=True)
                 t0 = time.time()
                 self.agent.train_with_batchs(msg[1])
                 self.agent.save_model()
-                print("Master process finished training. Time : "+str(time.time()-t0)+" \n")
+                print("Master process finished training. Time : "+str(time.time()-t0)+" \n", flush=True)
                 self.conn.send("saved")
 
         while True:
@@ -40,7 +40,7 @@ class AgentProcess(Process):
                 batch_values = []
                 batch_states = []
                 batch_actions = []
-                print("Process "+str(self.id)+" starts playing "+str(self.n_games)+" games.")
+                print("Process "+str(self.id)+" starts playing "+str(self.n_games)+" games.", flush=True)
                 scores = []
                 env = SnakeEnv()
                 overall_data = 0
