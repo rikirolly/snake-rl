@@ -1,0 +1,9 @@
+[project]
+name = "snake-rl"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.4.6",
+    "tensorflow>=2.0.0",
+]

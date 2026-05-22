@@ -1,162 +1,152 @@
 import numpy as np
 import tensorflow as tf
-import os
 import variables
 
 
-class A2C():
-    def __init__(self, id):
+class A2CModel(tf.keras.Model):
+    def __init__(self, env_width, env_height):
+        super().__init__()
+        self.conv1 = tf.keras.layers.Conv2D(100, (4, 4), activation='relu')
+        self.bn1 = tf.keras.layers.BatchNormalization()
+        self.conv2 = tf.keras.layers.Conv2D(200, (3, 3), activation='relu')
+        self.bn2 = tf.keras.layers.BatchNormalization()
+        self.flatten = tf.keras.layers.Flatten()
+        self.policy_fc = tf.keras.layers.Dense(200, activation=tf.nn.leaky_relu)
+        self.policy_logits = tf.keras.layers.Dense(4)
+        self.value_fc = tf.keras.layers.Dense(200, activation=tf.nn.leaky_relu)
+        self.value = tf.keras.layers.Dense(1)
+
+    def call(self, inputs, training=False):
+        # inputs: [batch, 1, H, W] (NCHW) -> NHWC
+        x = tf.transpose(inputs, [0, 2, 3, 1])
+        x = self.conv1(x)
+        x = self.bn1(x, training=training)
+        x = self.conv2(x)
+        x = self.bn2(x, training=training)
+        x = self.flatten(x)
+
+        p = self.policy_fc(x)
+        logits = self.policy_logits(p)
+        probs = tf.nn.softmax(logits)
+
+        v = self.value_fc(x)
+        value = self.value(v)
+
+        return probs, logits, value
+
+
+class A2C:
+    def __init__(self, id, n_gpu=4):
         self.id = id
 
-        self.batch_states = []
-        self.batch_values = []
-        self.batch_actions = []
-        self.batch_legal = []
+        # GPU assignment: 1 GPU for training (id 0-5), n-1 for playing
+        if n_gpu > 1:
+            gpus = tf.config.list_physical_devices('GPU')
+            if gpus:
+                gpu_id = 0 if self.id <= 5 else 1 + (self.id % (n_gpu - 1))
+                if gpu_id < len(gpus):
+                    tf.config.set_visible_devices(gpus[gpu_id], 'GPU')
+                    tf.config.experimental.set_memory_growth(gpus[gpu_id], True)
 
-        self.global_step = tf.Variable(0, name="global_step", trainable=False)
+        self.model = A2CModel(variables.env_width, variables.env_height)
+        self.global_step = tf.Variable(0, name="global_step", trainable=False, dtype=tf.int64)
 
-        n_gpu = 4
-        if(n_gpu == 1):
-            self._build_model()
-            self._build_train_op()
-        else:
-            # 1 GPU for training, n-1 for playing
-            # <= variables.n_process // (2*n_gpu)
-            if(self.id <= 5):
-                gpu_id = 0
-            else:
-                gpu_id = (1 + (self.id%(n_gpu-1)))
-            os.environ["CUDA_VISIBLE_DEVICES"]=str(gpu_id)
-            self._build_model()
-            self._build_train_op()
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            0.0003, decay_steps=1000, decay_rate=0.92, staircase=True)
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        # config.log_device_placement=True
-        # config.gpu_options.per_process_gpu_memory_fraction = 0.2
-        self.sess = tf.Session(config=config)
-        self.initializer = tf.global_variables_initializer()
-        self.sess.run(self.initializer)
+        self.save_dir = "./trained_agents/a2c/"
+        self.checkpoint = tf.train.Checkpoint(
+            model=self.model,
+            optimizer=self.optimizer,
+            global_step=self.global_step,
+        )
+        self.checkpoint_manager = tf.train.CheckpointManager(
+            self.checkpoint, self.save_dir, max_to_keep=5)
 
-        self.saver = tf.train.Saver()
-        self.save_path = "./trained_agents/a2c/"
-        self.load_model()
+        self._load_model()
 
-
-    def load_model(self):
+    def _load_model(self):
         try:
-            save_dir = '/'.join(self.save_path.split('/')[:-1])
-            ckpt = tf.train.get_checkpoint_state(save_dir)
-            load_path = ckpt.model_checkpoint_path
-            self.sess.run(self.initializer)
-            self.saver.restore(self.sess, load_path)
+            latest = self.checkpoint_manager.latest_checkpoint
+            if latest:
+                self.checkpoint.restore(latest).expect_partial()
+                print("Loaded model: {}".format(latest))
+            else:
+                print("No saved model to load, starting a new model from scratch.")
         except Exception as e:
             print(e)
             print("No saved model to load, starting a new model from scratch.")
-        else:
-            print("Loaded model: {}".format(load_path))
-
-
-
-    def _build_model(self):
-        # Inputs
-        self.input_states = tf.placeholder(dtype = tf.float32, shape = [None, 1, variables.env_width, variables.env_height])
-        input_states = tf.transpose(self.input_states, [0, 2, 3, 1])
-
-        net = tf.layers.conv2d(input_states, 100, (4,4), activation='relu')
-        net = tf.layers.batch_normalization(net)
-        net = tf.layers.conv2d(net, 200, (3,3), activation='relu')
-        net = tf.layers.batch_normalization(net)
-        net = tf.layers.flatten(net)
-
-        probsNet = tf.contrib.layers.fully_connected(net, 200, tf.nn.leaky_relu)
-        self.output_action_logits = tf.contrib.layers.fully_connected(probsNet, 4, activation_fn=None)
-        self.output_action_probs = tf.nn.softmax(self.output_action_logits)
-
-        valueNet = tf.contrib.layers.fully_connected(net, 200, tf.nn.leaky_relu)
-        self.output_value = tf.contrib.layers.fully_connected(valueNet, 1)
-
-    def _build_train_op(self):
-        self.actions_ph = tf.placeholder(tf.int32, (None,))
-        self.value_ph = tf.placeholder(tf.float32, (None,))
-        self.advantages_ph = tf.placeholder(tf.float32, (None,))
-
-        self.cross_entropy_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                                            logits=self.output_action_logits,
-                                            labels=self.actions_ph)
-        self.action_loss = tf.reduce_mean(tf.multiply(self.cross_entropy_loss, self.advantages_ph))
-
-        # Add entropy if you'd like more exploration
-        # self.entropy = -tf.reduce_mean(tf.reduce_sum(self.output_action_probs*tf.log(self.output_action_probs+1e-7), axis=1))/np.log(4)
-        # self.entropy = tf.where(tf.is_nan(self.entropy),0., self.entropy)
-        # self.action_loss -= 0.01*self.entropy
-
-        self.action_loss = tf.where(tf.is_nan(self.action_loss), 0., self.action_loss)
-
-        self.output_value_flatten = tf.reshape(self.output_value, (-1,))
-        self.value_loss = tf.reduce_mean((self.value_ph - self.output_value_flatten)**2)
-        self.value_loss = tf.where(tf.is_nan(self.value_loss), 0., self.value_loss)
-
-        self.total_loss = self.action_loss + 0.5 * self.value_loss
-
-        learning_rate = tf.train.exponential_decay(0.0003,
-                                        self.global_step, 1000,
-                                        0.92, staircase=True)
-        self.optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-        self.gradients = self.optimizer.compute_gradients(self.total_loss, var_list=tf.trainable_variables())
-        self.clipped_gradients = [(tf.clip_by_norm(grad, 20.0), var) if grad is not None else (tf.zeros_like(var), var) for grad, var in self.gradients]
-        self.train_op = self.optimizer.apply_gradients(self.clipped_gradients, self.global_step)
 
     def __call__(self, state):
-        p = self.getProbs(state)
+        p = self.get_probs(state)
         action = np.random.choice(4, 1, p=p)[0]
         return action
 
-    def getProbs(self, state):
-        p = self.sess.run(self.output_action_probs, {
-            self.input_states: [state],
-        })
-        p = p[0]
+    def get_probs(self, state):
+        probs, _, _ = self.model(np.array([state], dtype=np.float32), training=False)
+        p = probs.numpy()[0]
         if np.isnan(p[0]):
-            p = (1/len(p))*np.ones((1, len(p)))[0]
+            p = np.ones(len(p)) / len(p)
         return p
 
-    def train_with_batchs(self, batch):
-        self.batch_states = []
-        self.batch_values = []
-        self.batch_actions = []
+    @tf.function
+    def _train_step(self, states, actions, advantages, values):
+        with tf.GradientTape() as tape:
+            _, logits, predicted_values = self.model(states, training=True)
 
+            ce = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                logits=logits, labels=actions)
+            action_loss = tf.reduce_mean(ce * advantages)
+
+            value_loss = tf.reduce_mean(
+                (values - tf.squeeze(predicted_values, axis=-1)) ** 2)
+
+            total_loss = action_loss + 0.5 * value_loss
+
+        grads = tape.gradient(total_loss, self.model.trainable_variables)
+        clipped_grads = [
+            tf.clip_by_norm(g, 20.0) if g is not None else tf.zeros_like(v)
+            for g, v in zip(grads, self.model.trainable_variables)
+        ]
+        self.optimizer.apply_gradients(
+            zip(clipped_grads, self.model.trainable_variables))
+        self.global_step.assign_add(1)
+        return total_loss
+
+    def train_with_batchs(self, batch):
+        batch_states = []
+        batch_actions = []
+        batch_values = []
         for x in batch:
-            self.batch_states += x[0]
-            self.batch_actions += x[1]
-            self.batch_values += x[2]
-        self.batch_states = np.array(self.batch_states)
-        self.batch_actions = np.array(self.batch_actions)
-        self.batch_values = np.array(self.batch_values)
+            batch_states += x[0]
+            batch_actions += x[1]
+            batch_values += x[2]
+
+        batch_states = np.array(batch_states, dtype=np.float32)
+        batch_actions = np.array(batch_actions, dtype=np.int32)
+        batch_values = np.array(batch_values, dtype=np.float32)
 
         batch_size = 7000
-        for i in range(len(self.batch_states))[::batch_size]:
-            v = self.sess.run(
-                self.output_value,
-                {
-                    self.input_states: self.batch_states[i:i+batch_size],
-                }
-            )
-            advantages_ph = np.reshape(np.array(self.batch_values[i:i+batch_size]) - v.T, (-1,))
+        for i in range(0, len(batch_states), batch_size):
+            end = min(i + batch_size, len(batch_states))
+            s = batch_states[i:end]
+            a = batch_actions[i:end]
+            v = batch_values[i:end]
 
-            self.sess.run(
-                self.train_op,
-                {
-                    self.input_states: self.batch_states[i:i+batch_size],
-                    self.actions_ph: self.batch_actions[i:i+batch_size],
-                    self.advantages_ph: advantages_ph,
-                    self.value_ph: self.batch_values[i:i+batch_size],
-                }
-            )
+            _, _, predicted_v = self.model(s, training=False)
+            advantages = v - tf.squeeze(predicted_v, axis=-1).numpy()
+
+            self._train_step(s, a, advantages.astype(np.float32), v)
+
+    def load_model(self):
+        latest = self.checkpoint_manager.latest_checkpoint
+        if latest:
+            self.checkpoint.restore(latest).expect_partial()
 
     def save_model(self):
-        self.saver.save(self.sess, self.save_path, global_step=self.global_step)
+        self.checkpoint_manager.save()
 
     @property
     def train_itr(self):
-        return self.sess.run(self.global_step)
+        return self.global_step.numpy()
