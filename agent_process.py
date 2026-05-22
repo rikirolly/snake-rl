@@ -1,12 +1,13 @@
-from multiprocessing import Process, Queue
+from multiprocessing import Process
 from a2c import A2C
 import numpy as np
 import variables
-import threading
 import time
 
 from env import SnakeEnv
-import os
+
+GAMMA = 0.99
+
 
 class AgentProcess(Process):
     def __init__(self, conn, id, n_games):
@@ -45,30 +46,45 @@ class AgentProcess(Process):
                 overall_data = 0
                 for i in range(self.n_games):
                     state = env.init()
+                    episode_states = []
+                    episode_actions = []
+                    episode_rewards = []
                     t = 0
                     lastScoring = -1
                     while True:
                         action = self.agent([state])
                         newState, reward, done = env.step(action)
-                        if(reward == 1):
-                            for j in range(t - lastScoring):
-                                batch_values.append(1)
+
+                        episode_states.append([state])
+                        episode_actions.append(action)
+                        episode_rewards.append(reward)
+
+                        t += 1
+                        if reward == 1:
                             lastScoring = t
 
-                        batch_states.append([state])
-                        batch_actions.append(action)
-                        t += 1
-                        if(done or (t - lastScoring >= 100)):
-                            for j in range(t - lastScoring - 1):
-                                batch_values.append(0)
+                        if done or (t - lastScoring >= 100):
                             break
                         state = newState
+
+                    # Compute discounted returns
+                    T = len(episode_rewards)
+                    discounted_returns = np.zeros(T)
+                    running_return = 0.0
+                    for k in range(T - 1, -1, -1):
+                        running_return = episode_rewards[k] + GAMMA * running_return
+                        discounted_returns[k] = running_return
+
+                    batch_states += episode_states
+                    batch_actions += episode_actions
+                    batch_values += discounted_returns.tolist()
+
                     scores.append(env.score)
                     overall_data += t
 
-                    if(overall_data >= 10000):
+                    if overall_data >= 10000:
                         break
                 print("Process "+str(self.id)+" finished playing.")
                 batch = (batch_states, batch_actions, batch_values)
-                self.conn.send((np.mean(scores),batch))
+                self.conn.send((np.mean(scores), batch))
             treatQueue()

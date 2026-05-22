@@ -1,7 +1,5 @@
 import numpy as np
 import tensorflow as tf
-import random
-import time
 import os
 import variables
 
@@ -84,7 +82,7 @@ class A2C():
         self.advantages_ph = tf.placeholder(tf.float32, (None,))
 
         self.cross_entropy_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                                            logits=self.output_action_probs,
+                                            logits=self.output_action_logits,
                                             labels=self.actions_ph)
         self.action_loss = tf.reduce_mean(tf.multiply(self.cross_entropy_loss, self.advantages_ph))
 
@@ -93,26 +91,21 @@ class A2C():
         # self.entropy = tf.where(tf.is_nan(self.entropy),0., self.entropy)
         # self.action_loss -= 0.01*self.entropy
 
-        self.action_loss = tf.where(tf.is_nan(self.action_loss),0., self.action_loss)
-
+        self.action_loss = tf.where(tf.is_nan(self.action_loss), 0., self.action_loss)
 
         self.output_value_flatten = tf.reshape(self.output_value, (-1,))
         self.value_loss = tf.reduce_mean((self.value_ph - self.output_value_flatten)**2)
-        self.value_loss = tf.where(tf.is_nan(self.value_loss),0., self.value_loss)
+        self.value_loss = tf.where(tf.is_nan(self.value_loss), 0., self.value_loss)
+
+        self.total_loss = self.action_loss + 0.5 * self.value_loss
 
         learning_rate = tf.train.exponential_decay(0.0003,
                                         self.global_step, 1000,
                                         0.92, staircase=True)
-        self.optimizer_p = tf.train.AdamOptimizer(learning_rate=learning_rate)
-        self.gradients_p = self.optimizer_p.compute_gradients(self.action_loss, var_list=tf.trainable_variables())
-        self.clipped_gradients_p = [(tf.clip_by_norm(grad, 20.0), var) if (grad is not None) else (tf.zeros_like(var),var) for grad, var in self.gradients_p]
-        self.train_p_op = self.optimizer_p.apply_gradients(self.clipped_gradients_p,  self.global_step)
-
-
-        self.optimizer_v = tf.train.AdamOptimizer(learning_rate=learning_rate)
-        self.gradients_v = self.optimizer_v.compute_gradients(self.value_loss, var_list=tf.trainable_variables())
-        self.clipped_gradients_v = [(tf.clip_by_norm(grad, 20.0), var) if grad is not None else (tf.zeros_like(var),var) for grad, var in self.gradients_v]
-        self.train_v_op = self.optimizer_p.apply_gradients(self.clipped_gradients_v,  self.global_step)
+        self.optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+        self.gradients = self.optimizer.compute_gradients(self.total_loss, var_list=tf.trainable_variables())
+        self.clipped_gradients = [(tf.clip_by_norm(grad, 20.0), var) if grad is not None else (tf.zeros_like(var), var) for grad, var in self.gradients]
+        self.train_op = self.optimizer.apply_gradients(self.clipped_gradients, self.global_step)
 
     def __call__(self, state):
         p = self.getProbs(state)
@@ -151,20 +144,12 @@ class A2C():
             )
             advantages_ph = np.reshape(np.array(self.batch_values[i:i+batch_size]) - v.T, (-1,))
 
-
             self.sess.run(
-                self.train_p_op,
+                self.train_op,
                 {
                     self.input_states: self.batch_states[i:i+batch_size],
-                    self.actions_ph : self.batch_actions[i:i+batch_size],
-                    self.advantages_ph : advantages_ph,
-                }
-            )
-
-            self.sess.run(
-                self.train_v_op,
-                {
-                    self.input_states: self.batch_states[i:i+batch_size],
+                    self.actions_ph: self.batch_actions[i:i+batch_size],
+                    self.advantages_ph: advantages_ph,
                     self.value_ph: self.batch_values[i:i+batch_size],
                 }
             )

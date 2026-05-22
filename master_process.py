@@ -1,11 +1,9 @@
 import numpy as np
 import variables
 import time
-# import tensorflow as tf
-
 
 from agent_process import AgentProcess
-from multiprocessing import Process, Pipe
+from multiprocessing import Pipe
 import threading
 
 class MasterProcess():
